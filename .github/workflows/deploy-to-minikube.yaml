@@ -12,45 +12,98 @@ jobs:
       - name: Start minikube
         uses: medyagh/setup-minikube@master
 
-      - name: Try the cluster !
-        run: kubectl get pods -A
+        with:
+          minikube-version: 'latest'
 
-      - name: Build image
+      - name: Verify cluster (quick)
         run: |
+          kubectl get nodes -o wide || true
+          kubectl version --client
+
+      - name: Build Docker image inside Minikube's Docker daemon
+        run: |
+          # ensure bash
           export SHELL=/bin/bash
+          # switch docker client to minikube's daemon
           eval $(minikube -p minikube docker-env)
-          docker build -f ./Dockerfile -t karthickkatty1/node-app:latest .
-          echo -n "verifying images:"
-          docker images
+          # build the image (replace the image name with your DockerHub repo if you push to hub)
+          docker build -t karthickkatty1/node-app:latest .
+          echo "Local images in minikube docker:"
+          docker images | sed -n '1,20p'
 
-      - name: Deploy to minikube
+      - name: Apply Kubernetes manifests
         run: |
+          # apply your manifest (assumes k8s-node-app.yaml is in repo)
           kubectl apply -f k8s-node-app.yaml
 
-      - name: Debug pods (describe + get) 
-        run: | 
-          kubectl get pods -o wide
-          kubectl describe pod -l app=nodejs-app
-
-      - name: Check pod logs 
-        run: | 
-          POD=$(kubectl get pod -l app=nodejs-app -o jsonpath="{.items[0].metadata.name}") kubectl logs $POD
-
-      - name: Wait for pod to be ready
+      - name: Patch deployment to use local image and IfNotPresent (idempotent)
         run: |
-          kubectl rollout status deployment/nodejs-app --timeout=120s
+          # set the image explicitly to what we built above (works whether the manifest contains a different image)
+          kubectl set image deployment/nodejs-app nodejs-app=karthickkatty1/node-app:latest || true
+          # set imagePullPolicy to IfNotPresent (it will add or update)
+          kubectl patch deployment nodejs-app --type='merge' -p '{"spec":{"template":{"spec":{"containers":[{"name":"nodejs-app","imagePullPolicy":"IfNotPresent"}]}}}}' || true
+          # show the container image currently in the deployment
+          kubectl get deployment nodejs-app -o jsonpath="{.spec.template.spec.containers[*].image}" || true
 
-      - name: Wait until service responds
+      - name: Debug pods (get + describe)
         run: |
-          ATTEMPTS=10
-          for i in $(seq 1 $ATTEMPTS); do
-            URL=$(minikube service nodejs-app --url || true)
-            if [ ! -z &quot;$URL&quot; ]; then
-              echo "Service is up -> $URL"
+          echo "=== pods (wide) ==="
+          kubectl get pods -o wide || true
+          echo "=== describe pods (label: app=nodejs-app) ==="
+          kubectl describe pods -l app=nodejs-app || true
+
+      - name: Check pod logs (safe)
+        run: |
+          # print list of pods then try to fetch logs for the first matching pod (if any)
+          kubectl get pods -o wide || true
+          POD=$(kubectl get pod -l app=nodejs-app -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || true)
+          echo "Found pod: '$POD'"
+          if [ -n "$POD" ]; then
+            echo "---- logs for $POD ----"
+            kubectl logs "$POD" --tail=200 || true
+          else
+            echo "No pod found yet (logs skipped)"
+          fi
+
+
+      - name: Dump minikube logs (last 200 lines) for deeper debugging
+        run: |
+          minikube logs --file=./minikube-logs.txt || true
+          tail -n 200 ./minikube-logs.txt || true
+
+      - name: Wait for pod rollout (with timeout)
+        run: |
+          # wait up to 180 seconds (3 minutes) for the deployment to become ready
+          kubectl rollout status deployment/nodejs-app --timeout=180s
+
+      - name: Wait until service responds (retry loop)
+        run: |
+          attempts=15
+          echo "Trying to find service URL (will retry up to $attempts times every 8s)..."
+          for i in $(seq 1 $attempts); do
+            URL=$(minikube service nodejs-app --url 2>/dev/null || true)
+            if [ -n "$URL" ]; then
+              echo "Service is available -> $URL"
+              # print a quick curl to verify response
+              echo "Testing service (curl --max-time 5):"
+              curl --max-time 5 -sS "$URL" || true
               exit 0
             fi
-            echo "Service not ready yet... retrying"
-            sleep 10
+            echo "Service not ready (attempt $i/$attempts). Sleeping 8s..."
+            sleep 8
           done
-          echo "Service failed to start"
+          echo "Service did not become available after $attempts attempts"
+          # final debugging snapshot
+          kubectl get pods -o wide || true
+          kubectl describe pods -l app=nodejs-app || true
           exit 1
+
+      - name: Print final status
+        if: success()
+        run: |
+          echo "=== final pods ==="
+          kubectl get pods -o wide
+          echo "=== service list ==="
+          minikube service list || true
+          echo "Service URL:"
+          minikube service nodejs-app --url || true

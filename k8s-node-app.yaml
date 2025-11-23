@@ -19,7 +19,7 @@ spec:
         image: "karthickkatty1/node-app:latest"
         imagePullPolicy: IfNotPresent
         ports:
-        - containerPort: 3000
+        - containerPort: 8080
 ---
 apiVersion: v1
 kind: Service
@@ -32,6 +32,6 @@ spec:
   type: NodePort
   ports:
   - name: http
-    targetPort: 3000
+    targetPort: 8080
     port: 80
 
