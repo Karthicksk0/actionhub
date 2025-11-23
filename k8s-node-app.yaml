@@ -17,6 +17,7 @@ spec:
       containers:
       - name: nodejs-app
         image: "karthickkatty1/node-app:latest"
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 3000
 ---
