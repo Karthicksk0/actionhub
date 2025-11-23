@@ -29,7 +29,8 @@ jobs:
 
       - name: Debug pods (describe + get) 
         run: | 
-          kubectl get pods -o wide kubectl describe pod -l app=nodejs-app
+          kubectl get pods -o wide
+          kubectl describe pod -l app=nodejs-app
 
       - name: Check pod logs 
         run: | 
